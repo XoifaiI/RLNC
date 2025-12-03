@@ -1,7 +1,7 @@
 --[=[
 	RLNCEncoder: Random Linear Network Coding Encoder
 	
-	Responsible for padding data, dividing padded data into pieces, and
+	Padding data, dividing padded data into pieces, and
 	generating coded pieces based on randomly sampled coding vectors.
 	
 	Structure:
@@ -9,7 +9,7 @@
 		Full coded pieces consist of PieceCount random coefficients followed by
 		PieceByteLen bytes of coded data.
 	
-	Return type: Encoder constructor and methods
+	Return type: Encoder class
 	
 	Example usage:
 		local RLNCEncoder = require(path.to.RLNCEncoder)
@@ -33,6 +33,9 @@ local RLNCConstants = require("./Constants")
 type RLNCError = RLNCError.RLNCError
 
 export type Encoder = {
+	Data: buffer,
+	PieceCount: number,
+	PieceByteLen: number,
 	GetPieceCount: (self: Encoder) -> number,
 	GetPieceByteLen: (self: Encoder) -> number,
 	GetFullCodedPieceByteLen: (self: Encoder) -> number,
@@ -41,27 +44,56 @@ export type Encoder = {
 	Code: (self: Encoder, Random: Random) -> buffer,
 }
 
-type EncoderInternal = {
-	Data: buffer,
-	PieceCount: number,
-	PieceByteLen: number,
-}
+local Encoder = {}
+Encoder.__index = Encoder
 
-local function GetPieceCount(self: EncoderInternal): number
+function Encoder.New(Data: buffer, PieceCount: number): (Encoder?, RLNCError?)
+	local DataLen = buffer.len(Data)
+
+	if DataLen == 0 then
+		return nil, RLNCError.DataLengthZero
+	end
+
+	if PieceCount == 0 then
+		return nil, RLNCError.PieceCountZero
+	end
+
+	local BoundaryMarkerLen = 1
+	local PieceByteLen = math.ceil((DataLen + BoundaryMarkerLen) / PieceCount)
+	local PaddedDataLen = PieceCount * PieceByteLen
+
+	local PaddedData = buffer.create(PaddedDataLen)
+	buffer.copy(PaddedData, 0, Data, 0, DataLen)
+	buffer.writeu8(PaddedData, DataLen, RLNCConstants.BOUNDARY_MARKER)
+
+	local self = {
+		Data = PaddedData,
+		PieceCount = PieceCount,
+		PieceByteLen = PieceByteLen,
+	}
+
+	setmetatable(self, Encoder)
+
+	return (self :: any) :: Encoder, nil
+end
+
+function Encoder:GetPieceCount(): number
 	return self.PieceCount
 end
 
-local function GetPieceByteLen(self: EncoderInternal): number
+function Encoder:GetPieceByteLen(): number
 	return self.PieceByteLen
 end
 
-local function GetFullCodedPieceByteLen(self: EncoderInternal): number
-	return self.PieceCount + self.PieceByteLen
+function Encoder:GetFullCodedPieceByteLen(): number
+	local PieceCount: number = self.PieceCount
+	local PieceByteLen: number = self.PieceByteLen
+	return PieceCount + PieceByteLen
 end
 
-local function CodeWithCodingVector(self: EncoderInternal, CodingVector: buffer, CodedData: buffer): RLNCError?
-	local PieceCount = self.PieceCount
-	local PieceByteLen = self.PieceByteLen
+function Encoder:CodeWithCodingVector(CodingVector: buffer, CodedData: buffer): RLNCError?
+	local PieceCount: number = self.PieceCount
+	local PieceByteLen: number = self.PieceByteLen
 
 	if buffer.len(CodingVector) ~= PieceCount then
 		return RLNCError.CodingVectorLengthMismatch
@@ -73,7 +105,7 @@ local function CodeWithCodingVector(self: EncoderInternal, CodingVector: buffer,
 
 	buffer.fill(CodedData, 0, 0)
 
-	local Data = self.Data
+	local Data: buffer = self.Data
 
 	for PieceIndex = 0, PieceCount - 1 do
 		local Coefficient = buffer.readu8(CodingVector, PieceIndex)
@@ -90,9 +122,9 @@ local function CodeWithCodingVector(self: EncoderInternal, CodingVector: buffer,
 	return nil
 end
 
-local function CodeWithBuffer(self: EncoderInternal, FullCodedPiece: buffer, Random: Random): RLNCError?
-	local PieceCount = self.PieceCount
-	local PieceByteLen = self.PieceByteLen
+function Encoder:CodeWithBuffer(FullCodedPiece: buffer, Random: Random): RLNCError?
+	local PieceCount: number = self.PieceCount
+	local PieceByteLen: number = self.PieceByteLen
 	local ExpectedLen = PieceCount + PieceByteLen
 
 	if buffer.len(FullCodedPiece) ~= ExpectedLen then
@@ -107,7 +139,7 @@ local function CodeWithBuffer(self: EncoderInternal, FullCodedPiece: buffer, Ran
 	buffer.copy(CodingVector, 0, FullCodedPiece, 0, PieceCount)
 
 	local CodedData = buffer.create(PieceByteLen)
-	local Error = CodeWithCodingVector(self, CodingVector, CodedData)
+	local Error = self:CodeWithCodingVector(CodingVector, CodedData)
 
 	if Error then
 		return Error :: RLNCError
@@ -118,22 +150,15 @@ local function CodeWithBuffer(self: EncoderInternal, FullCodedPiece: buffer, Ran
 	return nil
 end
 
-local function Code(self: EncoderInternal, Random: Random): buffer
-	local FullCodedPiece = buffer.create(self.PieceCount + self.PieceByteLen)
-	CodeWithBuffer(self, FullCodedPiece, Random)
+function Encoder:Code(Random: Random): buffer
+	local PieceCount: number = self.PieceCount
+	local PieceByteLen: number = self.PieceByteLen
+	local FullCodedPiece = buffer.create(PieceCount + PieceByteLen)
+	self:CodeWithBuffer(FullCodedPiece, Random)
 	return FullCodedPiece
 end
 
-local EncoderMethods = {
-	GetPieceCount = GetPieceCount,
-	GetPieceByteLen = GetPieceByteLen,
-	GetFullCodedPieceByteLen = GetFullCodedPieceByteLen,
-	CodeWithCodingVector = CodeWithCodingVector,
-	CodeWithBuffer = CodeWithBuffer,
-	Code = Code,
-}
-
-local function WithoutPadding(Data: buffer, PieceCount: number): (Encoder?, RLNCError?)
+function Encoder.WithoutPadding(Data: buffer, PieceCount: number): (Encoder?, RLNCError?)
 	local DataLen = buffer.len(Data)
 
 	if DataLen == 0 then
@@ -154,44 +179,15 @@ local function WithoutPadding(Data: buffer, PieceCount: number): (Encoder?, RLNC
 	local DataCopy = buffer.create(DataLen)
 	buffer.copy(DataCopy, 0, Data, 0, DataLen)
 
-	local self: EncoderInternal = {
+	local self = {
 		Data = DataCopy,
 		PieceCount = PieceCount,
 		PieceByteLen = PieceByteLen,
 	}
 
-	return setmetatable(self, { __index = EncoderMethods }) :: any, nil
+	setmetatable(self, Encoder)
+
+	return (self :: any) :: Encoder, nil
 end
 
-local function New(Data: buffer, PieceCount: number): (Encoder?, RLNCError?)
-	local DataLen = buffer.len(Data)
-
-	if DataLen == 0 then
-		return nil, RLNCError.DataLengthZero
-	end
-
-	if PieceCount == 0 then
-		return nil, RLNCError.PieceCountZero
-	end
-
-	local BoundaryMarkerLen = 1
-	local PieceByteLen = math.ceil((DataLen + BoundaryMarkerLen) / PieceCount)
-	local PaddedDataLen = PieceCount * PieceByteLen
-
-	local PaddedData = buffer.create(PaddedDataLen)
-	buffer.copy(PaddedData, 0, Data, 0, DataLen)
-	buffer.writeu8(PaddedData, DataLen, RLNCConstants.BOUNDARY_MARKER)
-
-	local self: EncoderInternal = {
-		Data = PaddedData,
-		PieceCount = PieceCount,
-		PieceByteLen = PieceByteLen,
-	}
-
-	return setmetatable(self, { __index = EncoderMethods }) :: any, nil
-end
-
-return {
-	New = New,
-	WithoutPadding = WithoutPadding,
-}
+return Encoder

@@ -9,7 +9,7 @@
 	The output coding vector is done by multiplying the random recoding
 	vector by the matrix of received coding vectors.
 	
-	Return type: Recoder constructor and methods
+	Return type: Recoder class
 	
 	Example usage:
 		local RLNCRecoder = require(path.to.RLNCRecoder)
@@ -36,6 +36,12 @@ type RLNCError = RLNCError.RLNCError
 type Encoder = RLNCEncoder.Encoder
 
 export type Recoder = {
+	CodingVectors: buffer,
+	Encoder: Encoder,
+	NumPiecesReceived: number,
+	FullCodedPieceByteLen: number,
+	NumPiecesCodedTogether: number,
+	RandomRecodingVector: buffer,
 	GetOriginalNumPiecesCodedTogether: (self: Recoder) -> number,
 	GetNumPiecesRecodedTogether: (self: Recoder) -> number,
 	GetPieceByteLen: (self: Recoder) -> number,
@@ -44,89 +50,10 @@ export type Recoder = {
 	Recode: (self: Recoder, Random: Random) -> buffer,
 }
 
-type RecoderInternal = {
-	CodingVectors: buffer,
-	Encoder: Encoder,
-	NumPiecesReceived: number,
-	FullCodedPieceByteLen: number,
-	NumPiecesCodedTogether: number,
-	RandomRecodingVector: buffer,
-}
+local Recoder = {}
+Recoder.__index = Recoder
 
-local function GetOriginalNumPiecesCodedTogether(self: RecoderInternal): number
-	return self.NumPiecesCodedTogether
-end
-
-local function GetNumPiecesRecodedTogether(self: RecoderInternal): number
-	return self.NumPiecesReceived
-end
-
-local function GetPieceByteLen(self: RecoderInternal): number
-	return self.FullCodedPieceByteLen - self.NumPiecesCodedTogether
-end
-
-local function GetFullCodedPieceByteLen(self: RecoderInternal): number
-	return self.FullCodedPieceByteLen
-end
-
-local function RecodeWithBuffer(self: RecoderInternal, FullRecodedPiece: buffer, Random: Random): RLNCError?
-	if buffer.len(FullRecodedPiece) ~= self.FullCodedPieceByteLen then
-		return RLNCError.InvalidOutputBuffer
-	end
-
-	local NumPiecesCodedTogether = self.NumPiecesCodedTogether
-	local NumPiecesReceived = self.NumPiecesReceived
-	local RandomRecodingVector = self.RandomRecodingVector
-	local CodingVectors = self.CodingVectors
-
-	for Index = 0, NumPiecesReceived - 1 do
-		buffer.writeu8(RandomRecodingVector, Index, Random:NextInteger(0, 255))
-	end
-
-	for CoeffIdx = 0, NumPiecesCodedTogether - 1 do
-		local ComputedCoeff = 0
-
-		for RecodingVecIdx = 0, NumPiecesReceived - 1 do
-			local RecodingCoeff = buffer.readu8(RandomRecodingVector, RecodingVecIdx)
-			local RowBeginsAt = RecodingVecIdx * NumPiecesCodedTogether
-			local OriginalCoeff = buffer.readu8(CodingVectors, RowBeginsAt + CoeffIdx)
-
-			local Product = GF256.Mul(RecodingCoeff, OriginalCoeff)
-			ComputedCoeff = GF256.Add(ComputedCoeff, Product)
-		end
-
-		buffer.writeu8(FullRecodedPiece, CoeffIdx, ComputedCoeff)
-	end
-
-	local PieceByteLen = self.FullCodedPieceByteLen - NumPiecesCodedTogether
-	local RecodedData = buffer.create(PieceByteLen)
-
-	local Error: RLNCError? = self.Encoder:CodeWithCodingVector(RandomRecodingVector, RecodedData)
-	if Error then
-		return Error
-	end
-
-	buffer.copy(FullRecodedPiece, NumPiecesCodedTogether, RecodedData, 0, PieceByteLen)
-
-	return nil
-end
-
-local function Recode(self: RecoderInternal, Random: Random): buffer
-	local FullRecodedPiece = buffer.create(self.FullCodedPieceByteLen)
-	RecodeWithBuffer(self, FullRecodedPiece, Random)
-	return FullRecodedPiece
-end
-
-local RecoderMethods = {
-	GetOriginalNumPiecesCodedTogether = GetOriginalNumPiecesCodedTogether,
-	GetNumPiecesRecodedTogether = GetNumPiecesRecodedTogether,
-	GetPieceByteLen = GetPieceByteLen,
-	GetFullCodedPieceByteLen = GetFullCodedPieceByteLen,
-	RecodeWithBuffer = RecodeWithBuffer,
-	Recode = Recode,
-}
-
-local function New(Data: buffer, FullCodedPieceByteLen: number, NumPiecesCodedTogether: number): (Recoder?, RLNCError?)
+function Recoder.New(Data: buffer, FullCodedPieceByteLen: number, NumPiecesCodedTogether: number): (Recoder?, RLNCError?)
 	local DataLen = buffer.len(Data)
 
 	if DataLen == 0 then
@@ -167,23 +94,92 @@ local function New(Data: buffer, FullCodedPieceByteLen: number, NumPiecesCodedTo
 		buffer.copy(CodedPieces, CodedPieceDest, Data, ChunkStart + NumPiecesCodedTogether, PieceByteLen)
 	end
 
-	local Encoder: Encoder?, EncoderError: RLNCError? = RLNCEncoder.WithoutPadding(CodedPieces, NumPiecesReceived)
+	local EncoderInstance, EncoderError = RLNCEncoder.WithoutPadding(CodedPieces, NumPiecesReceived)
 	if EncoderError then
-		return nil, EncoderError
+		return nil, EncoderError :: RLNCError
 	end
 
-	local self: RecoderInternal = {
+	local self = {
 		CodingVectors = CodingVectors,
-		Encoder = Encoder :: Encoder,
+		Encoder = EncoderInstance :: Encoder,
 		NumPiecesReceived = NumPiecesReceived,
 		FullCodedPieceByteLen = FullCodedPieceByteLen,
 		NumPiecesCodedTogether = NumPiecesCodedTogether,
 		RandomRecodingVector = buffer.create(NumPiecesReceived),
 	}
 
-	return setmetatable(self, { __index = RecoderMethods }) :: any, nil
+	setmetatable(self, Recoder)
+
+	return (self :: any) :: Recoder, nil
 end
 
-return {
-	New = New,
-}
+function Recoder:GetOriginalNumPiecesCodedTogether(): number
+	return self.NumPiecesCodedTogether
+end
+
+function Recoder:GetNumPiecesRecodedTogether(): number
+	return self.NumPiecesReceived
+end
+
+function Recoder:GetPieceByteLen(): number
+	local Piecelen: number = self.FullCodedPieceByteLen
+	local PieceTogether: number = self.NumPiecesCodedTogether
+	
+	return Piecelen - PieceTogether
+end
+
+function Recoder:GetFullCodedPieceByteLen(): number
+	return self.FullCodedPieceByteLen
+end
+
+function Recoder:RecodeWithBuffer(FullRecodedPiece: buffer, Random: Random): RLNCError?
+	local FullCodedPieceByteLen: number = self.FullCodedPieceByteLen
+	local NumPiecesCodedTogether: number = self.NumPiecesCodedTogether
+	local NumPiecesReceived: number = self.NumPiecesReceived
+	local RandomRecodingVector: buffer = self.RandomRecodingVector
+	local CodingVectors: buffer = self.CodingVectors
+	local EncoderInstance: Encoder = self.Encoder
+
+	if buffer.len(FullRecodedPiece) ~= FullCodedPieceByteLen then
+		return RLNCError.InvalidOutputBuffer
+	end
+
+	for Index = 0, NumPiecesReceived - 1 do
+		buffer.writeu8(RandomRecodingVector, Index, Random:NextInteger(0, 255))
+	end
+
+	for CoeffIdx = 0, NumPiecesCodedTogether - 1 do
+		local ComputedCoeff = 0
+
+		for RecodingVecIdx = 0, NumPiecesReceived - 1 do
+			local RecodingCoeff = buffer.readu8(RandomRecodingVector, RecodingVecIdx)
+			local RowBeginsAt = RecodingVecIdx * NumPiecesCodedTogether
+			local OriginalCoeff = buffer.readu8(CodingVectors, RowBeginsAt + CoeffIdx)
+
+			local Product = GF256.Mul(RecodingCoeff, OriginalCoeff)
+			ComputedCoeff = GF256.Add(ComputedCoeff, Product)
+		end
+
+		buffer.writeu8(FullRecodedPiece, CoeffIdx, ComputedCoeff)
+	end
+
+	local PieceByteLen = FullCodedPieceByteLen - NumPiecesCodedTogether
+	local RecodedData = buffer.create(PieceByteLen)
+
+	local Error: RLNCError? = EncoderInstance:CodeWithCodingVector(RandomRecodingVector, RecodedData)
+	if Error then
+		return Error
+	end
+
+	buffer.copy(FullRecodedPiece, NumPiecesCodedTogether, RecodedData, 0, PieceByteLen)
+
+	return nil
+end
+
+function Recoder:Recode(Random: Random): buffer
+	local FullRecodedPiece = buffer.create(self.FullCodedPieceByteLen)
+	self:RecodeWithBuffer(FullRecodedPiece, Random)
+	return FullRecodedPiece
+end
+
+return Recoder

@@ -9,7 +9,7 @@
 		When enough linearly independent pieces are received, RREF reveals the
 		original data pieces.
 	
-	Return type: Decoder constructor and methods
+	Return type: Decoder class
 	
 	Example usage:
 		local RLNCDecoder = require(path.to.RLNCDecoder)
@@ -38,6 +38,11 @@ type RLNCError = RLNCError.RLNCError
 type DecoderMatrix = RLNCDecoderMatrix.DecoderMatrix
 
 export type Decoder = {
+	Matrix: DecoderMatrix,
+	PieceByteLen: number,
+	RequiredPieceCount: number,
+	ReceivedPieceCount: number,
+	UsefulPieceCount: number,
 	GetNumPiecesCodedTogether: (self: Decoder) -> number,
 	GetPieceByteLen: (self: Decoder) -> number,
 	GetFullCodedPieceByteLen: (self: Decoder) -> number,
@@ -48,72 +53,6 @@ export type Decoder = {
 	IsAlreadyDecoded: (self: Decoder) -> boolean,
 	GetDecodedData: (self: Decoder) -> (buffer?, RLNCError?),
 }
-
-type DecoderInternal = {
-	Matrix: DecoderMatrix,
-	PieceByteLen: number,
-	RequiredPieceCount: number,
-	ReceivedPieceCount: number,
-	UsefulPieceCount: number,
-}
-
-local function GetNumPiecesCodedTogether(self: DecoderInternal): number
-	return self.RequiredPieceCount
-end
-
-local function GetPieceByteLen(self: DecoderInternal): number
-	return self.PieceByteLen
-end
-
-local function GetFullCodedPieceByteLen(self: DecoderInternal): number
-	return self.RequiredPieceCount + self.PieceByteLen
-end
-
-local function GetReceivedPieceCount(self: DecoderInternal): number
-	return self.ReceivedPieceCount
-end
-
-local function GetUsefulPieceCount(self: DecoderInternal): number
-	return self.UsefulPieceCount
-end
-
-local function GetRemainingPieceCount(self: DecoderInternal): number
-	return self.RequiredPieceCount - self.UsefulPieceCount
-end
-
-local function IsAlreadyDecoded(self: DecoderInternal): boolean
-	return self.Matrix:Rank() == self.RequiredPieceCount
-end
-
-local function Decode(self: DecoderInternal, FullCodedPiece: buffer): RLNCError?
-	if IsAlreadyDecoded(self) then
-		return RLNCError.ReceivedAllPieces
-	end
-
-	local ExpectedLen = self.RequiredPieceCount + self.PieceByteLen
-	if buffer.len(FullCodedPiece) ~= ExpectedLen then
-		return RLNCError.InvalidPieceLength
-	end
-
-	local RankBefore = self.Matrix:Rank()
-
-	local AddError = self.Matrix:AddRow(FullCodedPiece)
-	if AddError then
-		return AddError :: RLNCError
-	end
-
-	self.Matrix:RREF()
-	self.ReceivedPieceCount += 1
-
-	local RankAfter = self.Matrix:Rank()
-
-	if RankBefore == RankAfter then
-		return RLNCError.PieceNotUseful
-	end
-
-	self.UsefulPieceCount = RankAfter
-	return nil
-end
 
 local function GetFinalDataLen(PaddedData: buffer): (number?, RLNCError?)
 	local DataLen = buffer.len(PaddedData)
@@ -144,25 +83,126 @@ local function GetFinalDataLen(PaddedData: buffer): (number?, RLNCError?)
 	return BoundaryMarkerIndex, nil
 end
 
-local function GetDecodedData(self: DecoderInternal): (buffer?, RLNCError?)
-	if not IsAlreadyDecoded(self) then
+local Decoder = {}
+Decoder.__index = Decoder
+
+function Decoder.New(PieceByteLen: number, RequiredPieceCount: number): (Decoder?, RLNCError?)
+	if PieceByteLen == 0 then
+		return nil, RLNCError.PieceLengthZero
+	end
+
+	if RequiredPieceCount == 0 then
+		return nil, RLNCError.PieceCountZero
+	end
+
+	local self = {
+		Matrix = RLNCDecoderMatrix.New(RequiredPieceCount, PieceByteLen),
+		PieceByteLen = PieceByteLen,
+		RequiredPieceCount = RequiredPieceCount,
+		ReceivedPieceCount = 0,
+		UsefulPieceCount = 0,
+	}
+
+	setmetatable(self, Decoder)
+
+	return (self :: any) :: Decoder, nil
+end
+
+function Decoder:GetNumPiecesCodedTogether(): number
+	return self.RequiredPieceCount
+end
+
+function Decoder:GetPieceByteLen(): number
+	return self.PieceByteLen
+end
+
+function Decoder:GetFullCodedPieceByteLen(): number
+	local RequiredPieceCount: number = self.RequiredPieceCount
+	local PieceByteLen: number = self.PieceByteLen
+	
+	return RequiredPieceCount + PieceByteLen
+end
+
+function Decoder:GetReceivedPieceCount(): number
+	return self.ReceivedPieceCount
+end
+
+function Decoder:GetUsefulPieceCount(): number
+	return self.UsefulPieceCount
+end
+
+function Decoder:GetRemainingPieceCount(): number
+	local RequiredPieceCount: number = self.RequiredPieceCount
+	local UsefulPieceCount: number = self.UsefulPieceCount
+	
+	return RequiredPieceCount - UsefulPieceCount
+end
+
+function Decoder:IsAlreadyDecoded(): boolean
+	local Matrix: DecoderMatrix = self.Matrix
+	local RequiredPieceCount: number = self.RequiredPieceCount
+	return Matrix:Rank() == RequiredPieceCount
+end
+
+function Decoder:Decode(FullCodedPiece: buffer): RLNCError?
+	if self:IsAlreadyDecoded() then
+		return RLNCError.ReceivedAllPieces
+	end
+
+	local RequiredPieceCount: number = self.RequiredPieceCount
+	local PieceByteLen: number = self.PieceByteLen
+	local Matrix: DecoderMatrix = self.Matrix
+
+	local ExpectedLen = RequiredPieceCount + PieceByteLen
+	if buffer.len(FullCodedPiece) ~= ExpectedLen then
+		return RLNCError.InvalidPieceLength
+	end
+
+	local RankBefore = Matrix:Rank()
+
+	local AddError = Matrix:AddRow(FullCodedPiece)
+	if AddError then
+		return AddError :: RLNCError
+	end
+
+	Matrix:RREF()
+	
+	local ReceivedPieceCount: number = self.ReceivedPieceCount
+	self.ReceivedPieceCount = ReceivedPieceCount + 1
+
+	local RankAfter = Matrix:Rank()
+
+	if RankBefore == RankAfter then
+		return RLNCError.PieceNotUseful
+	end
+
+	self.UsefulPieceCount = RankAfter
+	return nil
+end
+
+function Decoder:GetDecodedData(): (buffer?, RLNCError?)
+	if not self:IsAlreadyDecoded() then
 		return nil, RLNCError.NotAllPiecesReceivedYet
 	end
 
-	local RequiredLen = self.PieceByteLen * self.RequiredPieceCount
+	local RequiredPieceCount: number = self.RequiredPieceCount
+	local PieceByteLen: number = self.PieceByteLen
+	local Matrix: DecoderMatrix = self.Matrix
+
+	local RequiredLen = PieceByteLen * RequiredPieceCount
 	local OutputBuffer = buffer.create(RequiredLen)
 
-	local FullCodedPieceLen = self.RequiredPieceCount + self.PieceByteLen
-	local MatrixData = self.Matrix:ExtractData()
+	local FullCodedPieceLen = RequiredPieceCount + PieceByteLen
+	local MatrixData = Matrix:ExtractData()
 
 	local CurrentPos = 0
 
-	for ChunkIndex = 0, self.RequiredPieceCount - 1 do
+	for ChunkIndex = 0, RequiredPieceCount - 1 do
 		local ChunkStart = ChunkIndex * FullCodedPieceLen
-		local PayloadStart = ChunkStart + self.RequiredPieceCount
+		local PayloadStart = ChunkStart + RequiredPieceCount
 
-		buffer.copy(OutputBuffer, CurrentPos, MatrixData, PayloadStart, self.PieceByteLen)
-		CurrentPos += self.PieceByteLen
+		buffer.copy(OutputBuffer, CurrentPos, MatrixData, PayloadStart, PieceByteLen)
+		CurrentPos += PieceByteLen
 	end
 
 	local FinalLen, Error = GetFinalDataLen(OutputBuffer)
@@ -176,38 +216,4 @@ local function GetDecodedData(self: DecoderInternal): (buffer?, RLNCError?)
 	return FinalBuffer, nil
 end
 
-local DecoderMethods = {
-	GetNumPiecesCodedTogether = GetNumPiecesCodedTogether,
-	GetPieceByteLen = GetPieceByteLen,
-	GetFullCodedPieceByteLen = GetFullCodedPieceByteLen,
-	GetReceivedPieceCount = GetReceivedPieceCount,
-	GetUsefulPieceCount = GetUsefulPieceCount,
-	GetRemainingPieceCount = GetRemainingPieceCount,
-	Decode = Decode,
-	IsAlreadyDecoded = IsAlreadyDecoded,
-	GetDecodedData = GetDecodedData,
-}
-
-local function New(PieceByteLen: number, RequiredPieceCount: number): (Decoder?, RLNCError?)
-	if PieceByteLen == 0 then
-		return nil, RLNCError.PieceLengthZero
-	end
-
-	if RequiredPieceCount == 0 then
-		return nil, RLNCError.PieceCountZero
-	end
-
-	local self: DecoderInternal = {
-		Matrix = RLNCDecoderMatrix.New(RequiredPieceCount, PieceByteLen),
-		PieceByteLen = PieceByteLen,
-		RequiredPieceCount = RequiredPieceCount,
-		ReceivedPieceCount = 0,
-		UsefulPieceCount = 0,
-	}
-
-	return setmetatable(self, { __index = DecoderMethods }) :: any, nil
-end
-
-return {
-	New = New,
-}
+return Decoder
