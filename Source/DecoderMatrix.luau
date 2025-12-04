@@ -1,27 +1,11 @@
 --[=[
-	RLNCDecoderMatrix: Augmented Matrix for RLNC Decoding
+	RLNCDecoderMatrix: Augmented Matrix for RLNC Decoding 
 	
 	Gaussian elimination over GF(2^8) to decode RLNC coded pieces.
 	The matrix stores rows of [coding_vector | coded_data] and reduces to
 	RREF (Reduced Row Echelon Form) to recover original data.
 	
-	Structure:
-		Each row is a full coded piece: NumPiecesCoded coefficients + PieceByteLen data bytes.
-		Rows are stored contiguously in a single buffer.
-	
 	Return type: DecoderMatrix class
-	
-	Example usage:
-		local RLNCDecoderMatrix = require(path.to.RLNCDecoderMatrix)
-		
-		local Matrix = RLNCDecoderMatrix.New(4, 256)
-		Matrix:AddRow(CodedPiece1)
-		Matrix:AddRow(CodedPiece2)
-		Matrix:RREF()
-		
-		if Matrix:Rank() == 4 then
-			local DecodedData = Matrix:ExtractData()
-		end
 --]=]
 
 --!strict
@@ -48,36 +32,10 @@ export type DecoderMatrix = {
 	Set: (self: DecoderMatrix, Row: number, Col: number, Value: number) -> (),
 }
 
-local function MulVecByScalarThenAddIntoVec(
-	Dest: buffer,
-	DestOffset: number,
-	Src: buffer,
-	SrcOffset: number,
-	Length: number,
-	Scalar: number
-)
-	if Scalar == 0 then
-		return
-	end
-
-	for Index = 0, Length - 1 do
-		local SrcByte = buffer.readu8(Src, SrcOffset + Index)
-		local DestByte = buffer.readu8(Dest, DestOffset + Index)
-		local Product = GF256.Mul(SrcByte, Scalar)
-		buffer.writeu8(Dest, DestOffset + Index, GF256.Add(DestByte, Product))
-	end
-end
-
-local function InplaceMulVecByScalar(Buf: buffer, Offset: number, Length: number, Scalar: number)
-	if Scalar == 1 then
-		return
-	end
-
-	for Index = 0, Length - 1 do
-		local Byte = buffer.readu8(Buf, Offset + Index)
-		buffer.writeu8(Buf, Offset + Index, GF256.Mul(Byte, Scalar))
-	end
-end
+local GF256Div = GF256.Div
+local GF256Inv = GF256.Inv
+local GF256MulAddRow = GF256.MulAddRow
+local GF256MulRow = GF256.MulRow
 
 local DecoderMatrix = {}
 DecoderMatrix.__index = DecoderMatrix
@@ -103,6 +61,7 @@ function DecoderMatrix:Get(Row: number, Col: number): number
 	local Cols: number = self.Cols
 	local Elements: buffer = self.Elements
 	local Index = Row * Cols + Col
+	
 	return buffer.readu8(Elements, Index)
 end
 
@@ -110,6 +69,7 @@ function DecoderMatrix:Set(Row: number, Col: number, Value: number): ()
 	local Cols: number = self.Cols
 	local Elements: buffer = self.Elements
 	local Index = Row * Cols + Col
+	
 	buffer.writeu8(Elements, Index, Value)
 end
 
@@ -124,17 +84,19 @@ function DecoderMatrix:AddRow(Row: buffer): RLNCError?
 
 	local NewRows = CurrentRows + 1
 	local RequiredSize = NewRows * Cols
+	local Elements = self.Elements
 
 	if RequiredSize > self.Capacity then
 		local NewCapacity = math.max(RequiredSize, self.Capacity * 2)
 		local NewElements = buffer.create(NewCapacity)
-		buffer.copy(NewElements, 0, self.Elements, 0, CurrentRows * Cols)
+		buffer.copy(NewElements, 0, Elements, 0, CurrentRows * Cols)
+		Elements = NewElements
 		self.Elements = NewElements
 		self.Capacity = NewCapacity
 	end
 
 	local Offset = CurrentRows * Cols
-	buffer.copy(self.Elements, Offset, Row, 0, RowLen)
+	buffer.copy(Elements, Offset, Row, 0, RowLen)
 	self.Rows = NewRows
 
 	return nil
@@ -151,9 +113,11 @@ function DecoderMatrix:SwapRows(Row1: number, Row2: number): ()
 	local Start2 = Row2 * Cols
 
 	for Offset = 0, Cols - 1 do
-		local Temp = buffer.readu8(Elements, Start1 + Offset)
-		buffer.writeu8(Elements, Start1 + Offset, buffer.readu8(Elements, Start2 + Offset))
-		buffer.writeu8(Elements, Start2 + Offset, Temp)
+		local Pos1 = Start1 + Offset
+		local Pos2 = Start2 + Offset
+		local Temp = buffer.readu8(Elements, Pos1)
+		buffer.writeu8(Elements, Pos1, buffer.readu8(Elements, Pos2))
+		buffer.writeu8(Elements, Pos2, Temp)
 	end
 end
 
@@ -162,41 +126,46 @@ function DecoderMatrix:CleanForward(): ()
 	local Cols: number = self.Cols
 	local Elements: buffer = self.Elements
 	local Boundary = math.min(Rows, Cols)
+	local Div = GF256Div
+	local MulAddRow = GF256MulAddRow
 
 	for I = 0, Boundary - 1 do
-		if self:Get(I, I) == 0 then
-			local IsNonZeroCol = false
+		local DiagIndex = I * Cols + I
+		local DiagValue = buffer.readu8(Elements, DiagIndex)
+
+		if DiagValue == 0 then
 			local PivotRowIdx = I + 1
 
 			while PivotRowIdx < Rows do
-				if self:Get(PivotRowIdx, I) ~= 0 then
-					IsNonZeroCol = true
+				local PivotIndex = PivotRowIdx * Cols + I
+				if buffer.readu8(Elements, PivotIndex) ~= 0 then
 					break
 				end
 				PivotRowIdx += 1
 			end
 
-			if not IsNonZeroCol then
+			if PivotRowIdx >= Rows then
 				continue
 			end
 
 			self:SwapRows(I, PivotRowIdx)
+			DiagValue = buffer.readu8(Elements, DiagIndex)
 		end
 
+		local IRowStart = I * Cols + I
+		local Length = Cols - I
+
 		for J = I + 1, Rows - 1 do
-			local JI = self:Get(J, I)
+			local JIIndex = J * Cols + I
+			local JI = buffer.readu8(Elements, JIIndex)
 			if JI == 0 then
 				continue
 			end
 
-			local II = self:Get(I, I)
-			local Quotient = GF256.Div(JI, II) :: number
-
-			local IRowStart = I * Cols + I
+			local Quotient = Div(JI, DiagValue) :: number
 			local JRowStart = J * Cols + I
-			local Length = Cols - I
 
-			MulVecByScalarThenAddIntoVec(Elements, JRowStart, Elements, IRowStart, Length, Quotient)
+			MulAddRow(Elements, JRowStart, Elements, IRowStart, Length, Quotient)
 		end
 	end
 end
@@ -206,52 +175,57 @@ function DecoderMatrix:CleanBackward(): ()
 	local Cols: number = self.Cols
 	local Elements: buffer = self.Elements
 	local Boundary = math.min(Rows, Cols)
+	local Div = GF256Div
+	local Inv = GF256Inv
+	local MulAddRow = GF256MulAddRow
+	local MulRow = GF256MulRow
 
 	for I = Boundary - 1, 0, -1 do
-		local II = self:Get(I, I)
+		local DiagIndex = I * Cols + I
+		local II = buffer.readu8(Elements, DiagIndex)
 		if II == 0 then
 			continue
 		end
 
+		local IRowStart = I * Cols + I
+		local Length = Cols - I
+
 		for J = 0, I - 1 do
-			local JI = self:Get(J, I)
+			local JIIndex = J * Cols + I
+			local JI = buffer.readu8(Elements, JIIndex)
 			if JI == 0 then
 				continue
 			end
 
-			local Quotient = GF256.Div(JI, II) :: number
-
+			local Quotient = Div(JI, II) :: number
 			local JRowStart = J * Cols + I
-			local IRowStart = I * Cols + I
-			local Length = Cols - I
 
-			MulVecByScalarThenAddIntoVec(Elements, JRowStart, Elements, IRowStart, Length, Quotient)
+			MulAddRow(Elements, JRowStart, Elements, IRowStart, Length, Quotient)
 		end
 
 		if II == 1 then
 			continue
 		end
 
-		local Inv = GF256.Inv(II) :: number
-		self:Set(I, I, 1)
+		local InvII = Inv(II) :: number
+		buffer.writeu8(Elements, DiagIndex, 1)
 
-		local IRowStart = I * Cols + I + 1
-		local Length = Cols - I - 1
-
-		InplaceMulVecByScalar(Elements, IRowStart, Length, Inv)
+		MulRow(Elements, IRowStart + 1, Length - 1, InvII)
 	end
 end
 
 function DecoderMatrix:RemoveZeroRows(): ()
 	local NumPiecesCoded: number = self.NumPiecesCoded
 	local Cols: number = self.Cols
+	local Elements: buffer = self.Elements
 	local I = 0
 
 	while I < self.Rows do
 		local IsNonZeroRow = false
+		local RowStart = I * Cols
 
 		for CIdx = 0, NumPiecesCoded - 1 do
-			if self:Get(I, CIdx) ~= 0 then
+			if buffer.readu8(Elements, RowStart + CIdx) ~= 0 then
 				IsNonZeroRow = true
 				break
 			end
@@ -262,15 +236,16 @@ function DecoderMatrix:RemoveZeroRows(): ()
 			continue
 		end
 
+		local CurrentRows = self.Rows
 		local StartIdxToRemove = I * Cols
 		local StartIdxNextRow = (I + 1) * Cols
-		local TotalElements = self.Rows * Cols
+		local TotalElements = CurrentRows * Cols
 
 		if StartIdxNextRow < TotalElements then
-			buffer.copy(self.Elements, StartIdxToRemove, self.Elements, StartIdxNextRow, TotalElements - StartIdxNextRow)
+			buffer.copy(Elements, StartIdxToRemove, Elements, StartIdxNextRow, TotalElements - StartIdxNextRow)
 		end
 
-		self.Rows -= 1
+		self.Rows = CurrentRows - 1
 	end
 end
 
@@ -287,9 +262,11 @@ end
 function DecoderMatrix:ExtractData(): buffer
 	local Rows: number = self.Rows
 	local Cols: number = self.Cols
+	
 	local TotalBytes = Rows * Cols
 	local Result = buffer.create(TotalBytes)
 	buffer.copy(Result, 0, self.Elements, 0, TotalBytes)
+	
 	return Result
 end
 

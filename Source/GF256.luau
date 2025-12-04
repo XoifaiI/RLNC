@@ -4,8 +4,6 @@
 	Finite field arithmetic over GF(2^8) using the irreducible
 	polynomial x^8 + x^4 + x^3 + x + 1 with primitive element x = 3.
 	
-	Used for Random Linear Network Coding (RLNC) and error correction codes.
-	
 	Return type: Module table with GF256 operations
 	
 	Example usage:
@@ -24,7 +22,7 @@
 --!optimize 2
 --!native
 
-local LOG_TABLE, EXP_TABLE = buffer.create(256), buffer.create(510) do
+local LOG_TABLE, EXP_TABLE = buffer.create(256), buffer.create(512 + 256) do
 	local LogValues = {
 		0, 0, 25, 1, 50, 2, 26, 198, 75, 199, 27, 104, 51, 238, 223, 3,
 		100, 4, 224, 14, 52, 141, 129, 239, 76, 113, 8, 200, 248, 105, 28, 193,
@@ -74,6 +72,33 @@ local LOG_TABLE, EXP_TABLE = buffer.create(256), buffer.create(510) do
 	for Index = 0, 254 do
 		buffer.writeu8(EXP_TABLE, 255 + Index, buffer.readu8(EXP_TABLE, Index))
 	end
+
+	for Index = 0, 255 do
+		buffer.writeu8(EXP_TABLE, 510 + Index, buffer.readu8(EXP_TABLE, Index))
+	end
+
+	buffer.writeu8(EXP_TABLE, 510, 0)
+end
+
+local MUL_TABLES = buffer.create(256 * 256) do
+	for Scalar = 0, 255 do
+		local TableOffset = Scalar * 256
+		if Scalar == 0 then
+			for I = 0, 255 do
+				buffer.writeu8(MUL_TABLES, TableOffset + I, 0)
+			end
+		else
+			local LogScalar = buffer.readu8(LOG_TABLE, Scalar)
+			for I = 0, 255 do
+				if I == 0 then
+					buffer.writeu8(MUL_TABLES, TableOffset, 0)
+				else
+					local LogI = buffer.readu8(LOG_TABLE, I)
+					buffer.writeu8(MUL_TABLES, TableOffset + I, buffer.readu8(EXP_TABLE, LogScalar + LogI))
+				end
+			end
+		end
+	end
 end
 
 local function Add(A: number, B: number): number
@@ -89,14 +114,7 @@ local function Neg(A: number): number
 end
 
 local function Mul(A: number, B: number): number
-	if A == 0 or B == 0 then
-		return 0
-	end
-
-	local LogA = buffer.readu8(LOG_TABLE, A)
-	local LogB = buffer.readu8(LOG_TABLE, B)
-
-	return buffer.readu8(EXP_TABLE, LogA + LogB)
+	return buffer.readu8(MUL_TABLES, A * 256 + B)
 end
 
 local function Inv(A: number): number?
@@ -109,12 +127,11 @@ local function Inv(A: number): number?
 end
 
 local function Div(A: number, B: number): number?
-	local InvB = Inv(B)
-	if InvB == nil then
+	if B == 0 then
 		return nil
 	end
 
-	return Mul(A, InvB)
+	return buffer.readu8(MUL_TABLES, buffer.readu8(EXP_TABLE, 255 - buffer.readu8(LOG_TABLE, B)) * 256 + A)
 end
 
 local function Pow(Base: number, Exponent: number): number
@@ -132,6 +149,101 @@ local function Pow(Base: number, Exponent: number): number
 	return buffer.readu8(EXP_TABLE, ScaledLog)
 end
 
+local function MulAddRow(Dest: buffer, DestOffset: number, Src: buffer, SrcOffset: number, Length: number, Scalar: number)
+	if Scalar == 0 then
+		return
+	end
+
+	local TableOffset = Scalar * 256
+	local Tables = MUL_TABLES
+
+	local I = 0
+	local LengthMinus7 = Length - 7
+
+	while I < LengthMinus7 do
+		local SrcPos = SrcOffset + I
+		local DestPos = DestOffset + I
+
+		buffer.writeu8(Dest, DestPos, bit32.bxor(
+			buffer.readu8(Dest, DestPos),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos))
+			))
+		buffer.writeu8(Dest, DestPos + 1, bit32.bxor(
+			buffer.readu8(Dest, DestPos + 1),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos + 1))
+			))
+		buffer.writeu8(Dest, DestPos + 2, bit32.bxor(
+			buffer.readu8(Dest, DestPos + 2),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos + 2))
+			))
+		buffer.writeu8(Dest, DestPos + 3, bit32.bxor(
+			buffer.readu8(Dest, DestPos + 3),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos + 3))
+			))
+		buffer.writeu8(Dest, DestPos + 4, bit32.bxor(
+			buffer.readu8(Dest, DestPos + 4),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos + 4))
+			))
+		buffer.writeu8(Dest, DestPos + 5, bit32.bxor(
+			buffer.readu8(Dest, DestPos + 5),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos + 5))
+			))
+		buffer.writeu8(Dest, DestPos + 6, bit32.bxor(
+			buffer.readu8(Dest, DestPos + 6),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos + 6))
+			))
+		buffer.writeu8(Dest, DestPos + 7, bit32.bxor(
+			buffer.readu8(Dest, DestPos + 7),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos + 7))
+			))
+
+		I += 8
+	end
+
+	while I < Length do
+		local SrcPos = SrcOffset + I
+		local DestPos = DestOffset + I
+		buffer.writeu8(Dest, DestPos, bit32.bxor(
+			buffer.readu8(Dest, DestPos),
+			buffer.readu8(Tables, TableOffset + buffer.readu8(Src, SrcPos))
+			))
+		I += 1
+	end
+end
+
+local function MulRow(Buf: buffer, Offset: number, Length: number, Scalar: number)
+	if Scalar == 1 then
+		return
+	end
+
+	local TableOffset = Scalar * 256
+	local Tables = MUL_TABLES
+
+	local I = 0
+	local LengthMinus7 = Length - 7
+
+	while I < LengthMinus7 do
+		local Pos = Offset + I
+
+		buffer.writeu8(Buf, Pos, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos)))
+		buffer.writeu8(Buf, Pos + 1, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos + 1)))
+		buffer.writeu8(Buf, Pos + 2, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos + 2)))
+		buffer.writeu8(Buf, Pos + 3, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos + 3)))
+		buffer.writeu8(Buf, Pos + 4, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos + 4)))
+		buffer.writeu8(Buf, Pos + 5, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos + 5)))
+		buffer.writeu8(Buf, Pos + 6, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos + 6)))
+		buffer.writeu8(Buf, Pos + 7, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos + 7)))
+
+		I += 8
+	end
+
+	while I < Length do
+		local Pos = Offset + I
+		buffer.writeu8(Buf, Pos, buffer.readu8(Tables, TableOffset + buffer.readu8(Buf, Pos)))
+		I += 1
+	end
+end
+
 return {
 	Add = Add,
 	Sub = Sub,
@@ -140,6 +252,9 @@ return {
 	Div = Div,
 	Inv = Inv,
 	Pow = Pow,
+
+	MulAddRow = MulAddRow,
+	MulRow = MulRow,
 
 	Zero = 0,
 	One = 1,

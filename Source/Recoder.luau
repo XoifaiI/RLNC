@@ -5,23 +5,7 @@
 	coding vector. Useful for distributing coded pieces more widely without
 	needing to decode back to original data.
 	
-	A recoder acts as a new encoder operating on encoded source pieces.
-	The output coding vector is done by multiplying the random recoding
-	vector by the matrix of received coding vectors.
-	
 	Return type: Recoder class
-	
-	Example usage:
-		local RLNCRecoder = require(path.to.RLNCRecoder)
-		
-		local CodedPieces = buffer.create(NumPieces * FullCodedPieceLen)
-		-- ... fill with received coded pieces ...
-		
-		local Recoder, Error = RLNCRecoder.New(CodedPieces, FullCodedPieceLen, NumPiecesCoded)
-		
-		if Recoder then
-			local RecodedPiece = Recoder:Recode(Random.new())
-		end
 --]=]
 
 --!strict
@@ -49,6 +33,9 @@ export type Recoder = {
 	RecodeWithBuffer: (self: Recoder, FullRecodedPiece: buffer, Random: Random) -> RLNCError?,
 	Recode: (self: Recoder, Random: Random) -> buffer,
 }
+
+local GF256Mul = GF256.Mul
+local GF256Add = GF256.Add
 
 local Recoder = {}
 Recoder.__index = Recoder
@@ -124,7 +111,7 @@ end
 function Recoder:GetPieceByteLen(): number
 	local Piecelen: number = self.FullCodedPieceByteLen
 	local PieceTogether: number = self.NumPiecesCodedTogether
-	
+
 	return Piecelen - PieceTogether
 end
 
@@ -148,16 +135,23 @@ function Recoder:RecodeWithBuffer(FullRecodedPiece: buffer, Random: Random): RLN
 		buffer.writeu8(RandomRecodingVector, Index, Random:NextInteger(0, 255))
 	end
 
+	local Mul = GF256Mul
+	local Add = GF256Add
+
 	for CoeffIdx = 0, NumPiecesCodedTogether - 1 do
 		local ComputedCoeff = 0
 
 		for RecodingVecIdx = 0, NumPiecesReceived - 1 do
 			local RecodingCoeff = buffer.readu8(RandomRecodingVector, RecodingVecIdx)
+			if RecodingCoeff == 0 then
+				continue
+			end
+
 			local RowBeginsAt = RecodingVecIdx * NumPiecesCodedTogether
 			local OriginalCoeff = buffer.readu8(CodingVectors, RowBeginsAt + CoeffIdx)
 
-			local Product = GF256.Mul(RecodingCoeff, OriginalCoeff)
-			ComputedCoeff = GF256.Add(ComputedCoeff, Product)
+			local Product = Mul(RecodingCoeff, OriginalCoeff)
+			ComputedCoeff = Add(ComputedCoeff, Product)
 		end
 
 		buffer.writeu8(FullRecodedPiece, CoeffIdx, ComputedCoeff)

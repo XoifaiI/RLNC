@@ -4,22 +4,7 @@
 	Padding data, dividing padded data into pieces, and
 	generating coded pieces based on randomly sampled coding vectors.
 	
-	Structure:
-		Encoder holds padded data split into PieceCount pieces of PieceByteLen bytes each.
-		Full coded pieces consist of PieceCount random coefficients followed by
-		PieceByteLen bytes of coded data.
-	
 	Return type: Encoder class
-	
-	Example usage:
-		local RLNCEncoder = require(path.to.RLNCEncoder)
-		
-		local Data = buffer.fromstring("Hello, World!")
-		local Encoder, Error = RLNCEncoder.New(Data, 4)
-		
-		if Encoder then
-			local CodedPiece = Encoder:Code()
-		end
 --]=]
 
 --!strict
@@ -44,6 +29,9 @@ export type Encoder = {
 	Code: (self: Encoder, Random: Random) -> buffer,
 }
 
+local GF256MulAddRow = GF256.MulAddRow
+local BOUNDARY_MARKER = RLNCConstants.BOUNDARY_MARKER
+
 local Encoder = {}
 Encoder.__index = Encoder
 
@@ -64,7 +52,7 @@ function Encoder.New(Data: buffer, PieceCount: number): (Encoder?, RLNCError?)
 
 	local PaddedData = buffer.create(PaddedDataLen)
 	buffer.copy(PaddedData, 0, Data, 0, DataLen)
-	buffer.writeu8(PaddedData, DataLen, RLNCConstants.BOUNDARY_MARKER)
+	buffer.writeu8(PaddedData, DataLen, BOUNDARY_MARKER)
 
 	local self = {
 		Data = PaddedData,
@@ -106,17 +94,16 @@ function Encoder:CodeWithCodingVector(CodingVector: buffer, CodedData: buffer): 
 	buffer.fill(CodedData, 0, 0)
 
 	local Data: buffer = self.Data
+	local MulAddRow = GF256MulAddRow
 
 	for PieceIndex = 0, PieceCount - 1 do
 		local Coefficient = buffer.readu8(CodingVector, PieceIndex)
-		local PieceOffset = PieceIndex * PieceByteLen
-
-		for ByteIndex = 0, PieceByteLen - 1 do
-			local DataByte = buffer.readu8(Data, PieceOffset + ByteIndex)
-			local CodedByte = buffer.readu8(CodedData, ByteIndex)
-			local Product = GF256.Mul(DataByte, Coefficient)
-			buffer.writeu8(CodedData, ByteIndex, GF256.Add(CodedByte, Product))
+		if Coefficient == 0 then
+			continue
 		end
+
+		local PieceOffset = PieceIndex * PieceByteLen
+		MulAddRow(CodedData, 0, Data, PieceOffset, PieceByteLen, Coefficient)
 	end
 
 	return nil
@@ -154,7 +141,9 @@ function Encoder:Code(Random: Random): buffer
 	local PieceCount: number = self.PieceCount
 	local PieceByteLen: number = self.PieceByteLen
 	local FullCodedPiece = buffer.create(PieceCount + PieceByteLen)
+	
 	self:CodeWithBuffer(FullCodedPiece, Random)
+	
 	return FullCodedPiece
 end
 

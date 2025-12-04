@@ -10,20 +10,6 @@
 		original data pieces.
 	
 	Return type: Decoder class
-	
-	Example usage:
-		local RLNCDecoder = require(path.to.RLNCDecoder)
-		
-		local Decoder, Error = RLNCDecoder.New(256, 4)
-		
-		if Decoder then
-			while not Decoder:IsAlreadyDecoded() do
-				local CodedPiece = ReceiveCodedPiece()
-				Decoder:Decode(CodedPiece)
-			end
-			
-			local OriginalData, Error = Decoder:GetDecodedData()
-		end
 --]=]
 
 --!strict
@@ -62,9 +48,10 @@ local function GetFinalDataLen(PaddedData: buffer): (number?, RLNCError?)
 
 	local LastIndex = DataLen - 1
 	local BoundaryMarkerIndex: number? = nil
+	local BoundaryMarker = RLNCConstants.BOUNDARY_MARKER
 
 	for I = LastIndex, 0, -1 do
-		if buffer.readu8(PaddedData, I) == RLNCConstants.BOUNDARY_MARKER then
+		if buffer.readu8(PaddedData, I) == BoundaryMarker then
 			BoundaryMarkerIndex = I
 			break
 		end
